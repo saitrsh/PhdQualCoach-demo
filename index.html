@@ -42,6 +42,13 @@
   .v-warn{background:rgba(242,179,74,.13);color:var(--warn);border:1px solid rgba(242,179,74,.4)}
   .answer{white-space:pre-wrap;font-size:14px;background:var(--panel2);border:1px solid var(--edge);
     border-radius:10px;padding:14px;margin-top:12px}
+  .answer mark{background:rgba(242,179,74,.28);color:var(--ink);border-radius:3px;padding:0 2px}
+  .keypoints{margin-top:12px;background:rgba(55,201,138,.08);border:1px solid rgba(55,201,138,.35);
+    border-left:4px solid var(--good);border-radius:10px;padding:12px 14px}
+  .kp-h{font-weight:700;color:var(--good);font-size:13px;margin-bottom:8px}
+  .kp-item{font-size:13px;color:var(--ink);margin:6px 0;line-height:1.5}
+  .kp-n{font-family:var(--mono);color:var(--good);font-weight:700;margin-right:6px}
+  .kp-src{font-family:var(--mono);font-size:11px;color:var(--dim);margin-left:6px}
   .cite{border-left:3px solid var(--accent);padding:8px 12px;margin:8px 0;background:var(--panel2);
     border-radius:0 8px 8px 0}
   .cite .meta{font-size:11px;color:var(--dim);margin-bottom:3px}
@@ -120,6 +127,7 @@
       <h2 style="margin:0">Answer</h2>
       <span id="verdict"></span>
     </div>
+    <div class="keypoints" id="keypoints" style="display:none"></div>
     <div class="answer" id="answer"></div>
     <div class="actions" style="margin-top:12px">
       <button id="genllm">🦞 用 nemotron 生成解答</button>
@@ -200,21 +208,36 @@ function searchBm25(q,topic){
 function search(q,topic){
   return CFG.retrieval_backend==="bm25" ? searchBm25(q,topic) : searchTfidf(q,topic);
 }
+function firstSentence(t){ t=t.replace(/\s+/g," ").trim();
+  const m=t.match(/^.*?[.!?。！？](\s|$)/); let s=(m?m[0]:t).trim();
+  if(s.length>240) s=s.slice(0,240)+"…"; return s; }
 function ask(q,topic){
   // Drop zero-score hits: no shared term = not a real match, so not a citation.
   const hits=search(q,topic).filter(h=>h[0]>0);
   const top=hits.length?hits[0][0]:0;
   const warn= top < CFG.warn_threshold;
   const cites=hits.map((h,i)=>({rank:i+1,...h[1],score:h[0]}));
+  // key points = the lead claim of each top grounded passage (its definition /
+  // core statement). Extracted from the cited evidence, never invented.
+  const points=hits.slice(0,3).map((h,i)=>({n:i+1,doc:h[1].doc_id,text:firstSentence(h[1].text)}));
   const body = hits.length
     ? "Q: "+q+"\n\nGrounded in the retrieved passages:\n"+
       hits.map((h,i)=>{let s=h[1].text.replace(/\n/g," ").trim(); if(s.length>900)s=s.slice(0,900)+"…";
         return "  ["+(i+1)+"] ("+h[1].source+") "+s;}).join("\n")
     : "Q: "+q+"\n\nNo passages in the corpus matched this question — it is likely "+
       "outside the selected topic/corpus. (Try a different Topic filter, or All topics.)";
-  return {body,cites,warn,top};
+  return {body,cites,warn,top,points};
 }
 function esc(s){return s.replace(/[&<>]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;"}[c]));}
+// Highlight the question's salient terms inside already-escaped text. Guards
+// against matching inside HTML entities (&amp; etc.) so escaping stays intact.
+function highlightTerms(escaped,q){
+  const toks=[...new Set(tokenize(q))].filter(t=>t.length>2).sort((a,b)=>b.length-a.length).slice(0,12);
+  let html=escaped;
+  toks.forEach(t=>{ const p=t.replace(/[.*+?^${}()|[\]\\]/g,"\\$&");
+    try{ html=html.replace(new RegExp("(?<![\\w&])("+p+")(?![\\w;])","gi"),'<mark>$1</mark>'); }catch(_){} });
+  return html;
+}
 
 function mathRender(el){
   if(!window.renderMathInElement) return;
@@ -226,8 +249,17 @@ function render(q){
   const topic=document.getElementById("topic").value;
   const r=ask(q,topic);   // instant client-side preview (embedded index; no-store keeps it fresh on reload)
   document.getElementById("result").style.display="block";
-  document.getElementById("answer").textContent=r.body;
-  mathRender(document.getElementById("answer"));
+  // key-points callout: the lead claim of each top grounded citation, with the
+  // question's terms marked — "the key points of the answer", from the evidence.
+  const kp=document.getElementById("keypoints");
+  if(r.points && r.points.length){ kp.style.display="block";
+    kp.innerHTML='<div class="kp-h">✦ 答案重點 · key points（擷取自接地引用）</div>'+
+      r.points.map(p=>`<div class="kp-item"><span class="kp-n">[${p.n}]</span>${highlightTerms(esc(p.text),q)}<span class="kp-src">${esc(p.doc)}</span></div>`).join("");
+    mathRender(kp);
+  } else { kp.style.display="none"; kp.innerHTML=""; }
+  const ans=document.getElementById("answer");
+  ans.innerHTML=highlightTerms(esc(r.body),q);   // mark the question's terms in the answer
+  mathRender(ans);
   const v=document.getElementById("verdict");
   v.className="verdict "+(r.warn?"v-warn":"v-good");
   v.textContent=(r.warn?"⚠ WARN":"✓ GROUNDED")+" · top="+r.top.toFixed(4);
@@ -448,11 +480,17 @@ function drawConceptGraph(){
       if(drag.type==="node"){ drag.moved=true; const gp=toGraph(vb.x,vb.y); pos[drag.k].x=gp.x; pos[drag.k].y=gp.y; kick(); }
       else { view.tx=drag.tx0+(vb.x-drag.x); view.ty=drag.ty0+(vb.y-drag.y); applyView(); } });
     svg.addEventListener("pointerup",e=>{ if(!drag) return;
-      if(drag.type==="node"){ if(!drag.moved && drag.k!==CG_Q){ const t=info(drag.k).subject, ts=document.getElementById("topic");
-          if(ts){ts.value=t; ts.dispatchEvent(new Event("change"));}
-          document.getElementById("q").value=info(drag.k).label; window.scrollTo({top:0,behavior:"smooth"}); }
-        pinned=null; kick(); reset(); }
-      drag=null; try{svg.releasePointerCapture(e.pointerId);}catch(_){} });
+      const d=drag; drag=null; try{svg.releasePointerCapture(e.pointerId);}catch(_){}
+      if(d.type!=="node") return;
+      pinned=null;
+      if(!d.moved && d.k!==CG_Q){ // a click on a concept → answer it up top, key points marked
+        const t=info(d.k).subject, ts=document.getElementById("topic");
+        if(ts){ ts.value=t; ts.dispatchEvent(new Event("change")); }
+        const lbl=info(d.k).label; document.getElementById("q").value=lbl;
+        window.scrollTo({top:0,behavior:"smooth"}); render(lbl);   // render rebuilds the graph (question mode)
+        return;
+      }
+      kick(); reset(); });
     svg.addEventListener("dblclick",()=>{ view={k:1,tx:0,ty:0}; applyView();
       curNodes.forEach(k=>{ pos[k].x=orig[k].x; pos[k].y=orig[k].y; vel[k].x=vel[k].y=0; }); kick(); });
     [...svg.querySelectorAll(".cg-node")].forEach(el=>{ const k=el.dataset.i;
