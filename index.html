@@ -429,17 +429,23 @@ function drawConceptGraph(){
       const items=mode.ids.map(o=>(o&&o.id)?o:{id:o,score:null}).filter(o=>KINFO[o.id]);
       const seedIds=[...new Set(items.map(o=>o.id))];
       const scoreOf={}; items.forEach(o=>{ if(o.score!=null) scoreOf[o.id]=o.score; });
-      const MAXD=4;
+      // Relevance-BOUNDED BFS: without a cap, 4 hops swallow the whole graph and
+      // the "question" graph becomes the total graph re-centred. So each layer
+      // keeps only the CAP strongest new neighbours (by edge weight ≥ MINW) — the
+      // question's focused neighbourhood to depth 4, not everything.
+      const MAXD=4, CAP=6, MINW=0.05;
       layerOf={}; layerOf[CG_Q]=0;
-      const layers=[[CG_Q]]; let frontier=[];
-      seedIds.forEach(d=>{ if(!(d in layerOf)){ layerOf[d]=1; frontier.push(d); } });
+      const layers=[[CG_Q]];
+      let frontier=seedIds.slice().sort((a,b)=>(scoreOf[b]||0)-(scoreOf[a]||0)).slice(0,CAP);
+      frontier.forEach(d=>{ layerOf[d]=1; });
       layers.push(frontier.slice());
       for(let L=2; L<=MAXD; L++){
-        const next=[];
-        // strongest links first, capped per layer so deep layers stay readable
-        frontier.forEach(u=>{ (gAdj[u]||[]).slice().sort((x,y)=>y[1]-x[1]).forEach(([v])=>{
-          if(!(v in layerOf)){ layerOf[v]=L; next.push(v); } }); });
+        const cand={};   // candidate → strongest edge weight linking it to the frontier
+        frontier.forEach(u=>{ (gAdj[u]||[]).forEach(([v,w])=>{
+          if(!(v in layerOf) && w>=MINW && w>(cand[v]||0)) cand[v]=w; }); });
+        const next=Object.keys(cand).sort((a,b)=>cand[b]-cand[a]).slice(0,CAP);
         if(!next.length) break;
+        next.forEach(v=>{ layerOf[v]=L; });
         layers.push(next); frontier=next;
       }
       const conceptIds=Object.keys(layerOf).filter(k=>k!==CG_Q);
