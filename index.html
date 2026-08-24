@@ -344,37 +344,68 @@ function drawConceptGraph(){
     view.tx=vb.x-gx*view.k; view.ty=vb.y-gy*view.k; applyView();
   },{passive:false});
 
-  function moveNode(i,gx,gy){ P[i].x=gx; P[i].y=gy;
-    nodeEls[i].setAttribute("transform",`translate(${gx},${gy})`);
-    incident[i].forEach(e=>{ const el=lineEls[e];
-      if(+el.dataset.i===i){el.setAttribute("x1",gx);el.setAttribute("y1",gy);}
-      if(+el.dataset.j===i){el.setAttribute("x2",gx);el.setAttribute("y2",gy);} });
+  // --- live spring simulation: dragging a concept tugs its linked concepts ---
+  // Rest state = the server layout: each edge's rest length is its initial
+  // length and each node is lightly anchored to its start, so with nothing
+  // dragged the net force is ~0 (no jump). Dragging pins a node; springs pull
+  // its neighbours, propagating through the graph; on release everything relaxes
+  // back. Runs via rAF only while there is motion, then stops (idle = no CPU).
+  const ORIG=N.map(n=>({x:n.x,y:n.y}));
+  const Vel=N.map(()=>({x:0,y:0}));
+  const restLen=g.edges.map(([i,j])=> Math.hypot(N[i].x-N[j].x,N[i].y-N[j].y)||1);
+  const KS=0.09, KA=0.02, DAMP=0.80;
+  let pinned=null, raf=null;
+  function redrawAll(){
+    for(let k=0;k<P.length;k++)
+      nodeEls[k].setAttribute("transform",`translate(${P[k].x.toFixed(1)},${P[k].y.toFixed(1)})`);
+    g.edges.forEach(([i,j],e)=>{ const el=lineEls[e];
+      el.setAttribute("x1",P[i].x.toFixed(1)); el.setAttribute("y1",P[i].y.toFixed(1));
+      el.setAttribute("x2",P[j].x.toFixed(1)); el.setAttribute("y2",P[j].y.toFixed(1)); });
   }
+  function physics(){
+    const F=P.map(()=>({x:0,y:0}));
+    g.edges.forEach(([i,j],e)=>{ const dx=P[j].x-P[i].x, dy=P[j].y-P[i].y;
+      const d=Math.hypot(dx,dy)||1, f=KS*(d-restLen[e]), ux=dx/d, uy=dy/d;
+      F[i].x+=ux*f; F[i].y+=uy*f; F[j].x-=ux*f; F[j].y-=uy*f; });
+    for(let k=0;k<P.length;k++){ F[k].x+=KA*(ORIG[k].x-P[k].x); F[k].y+=KA*(ORIG[k].y-P[k].y); }
+    let energy=0;
+    for(let k=0;k<P.length;k++){ if(k===pinned) continue;
+      Vel[k].x=(Vel[k].x+F[k].x)*DAMP; Vel[k].y=(Vel[k].y+F[k].y)*DAMP;
+      P[k].x+=Vel[k].x; P[k].y+=Vel[k].y; energy+=Vel[k].x*Vel[k].x+Vel[k].y*Vel[k].y; }
+    redrawAll();
+    if(pinned!==null || energy>0.02){ raf=requestAnimationFrame(physics); } else { raf=null; }
+  }
+  function kick(){ if(raf===null) raf=requestAnimationFrame(physics); }
 
   let drag=null;  // {type:'node',i} | {type:'pan'}
   function onDown(e){
     const ng=e.target.closest(".cg-node");
     const vb=toVB(e);
-    if(ng){ const i=+ng.dataset.i; drag={type:"node",i,moved:false}; focus(i); }
+    if(ng){ const i=+ng.dataset.i; drag={type:"node",i,moved:false}; pinned=i; Vel[i].x=Vel[i].y=0; focus(i); }
     else { drag={type:"pan",x:vb.x,y:vb.y,tx0:view.tx,ty0:view.ty}; }
     svg.setPointerCapture(e.pointerId); e.preventDefault();
   }
   function onMove(e){ if(!drag) return; const vb=toVB(e);
-    if(drag.type==="node"){ drag.moved=true; const gp=toGraph(vb.x,vb.y); moveNode(drag.i,gp.x,gp.y); }
+    if(drag.type==="node"){ drag.moved=true; const gp=toGraph(vb.x,vb.y);
+      P[drag.i].x=gp.x; P[drag.i].y=gp.y; kick(); }        // pinned node follows pointer; springs do the rest
     else { view.tx=drag.tx0+(vb.x-drag.x); view.ty=drag.ty0+(vb.y-drag.y); applyView(); }
   }
   function onUp(e){ if(!drag) return;
-    if(drag.type==="node" && !drag.moved){ // a click, not a drag → filter the coach
-      const t=N[drag.i].subject; const ts=document.getElementById("topic");
-      if(ts){ts.value=t; ts.dispatchEvent(new Event("change"));}
-      document.getElementById("q").value=N[drag.i].label; window.scrollTo({top:0,behavior:"smooth"}); }
-    if(drag.type==="node") reset();
+    if(drag.type==="node"){
+      if(!drag.moved){ // a click, not a drag → filter the coach
+        const t=N[drag.i].subject; const ts=document.getElementById("topic");
+        if(ts){ts.value=t; ts.dispatchEvent(new Event("change"));}
+        document.getElementById("q").value=N[drag.i].label; window.scrollTo({top:0,behavior:"smooth"}); }
+      pinned=null; kick(); reset();                        // release → graph relaxes back
+    }
     drag=null; try{svg.releasePointerCapture(e.pointerId);}catch(_){}
   }
   svg.addEventListener("pointerdown",onDown);
   svg.addEventListener("pointermove",onMove);
   svg.addEventListener("pointerup",onUp);
-  svg.addEventListener("dblclick",()=>{ view={k:1,tx:0,ty:0}; applyView(); });
+  svg.addEventListener("dblclick",()=>{ view={k:1,tx:0,ty:0}; applyView();
+    for(let k=0;k<P.length;k++){ P[k].x=ORIG[k].x; P[k].y=ORIG[k].y; Vel[k].x=Vel[k].y=0; }
+    redrawAll(); });
 
   function focus(i){ const keep=new Set([i,...adj[i]]);
     nodeEls.forEach((el,k)=>el.setAttribute("opacity", keep.has(k)?"1":"0.18"));
