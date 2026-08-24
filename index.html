@@ -60,6 +60,12 @@
   .cg-label{fill:var(--ink);font-size:10px;pointer-events:none;font-family:var(--mono);
     paint-order:stroke;stroke:#0f1117;stroke-width:2.5px}
   .cg-qlabel{fill:#e0b3ff;font-size:12px;font-weight:700}
+  .cg-detail{margin-top:10px;background:var(--panel2);border:1px solid var(--edge);border-radius:10px;
+    padding:12px 14px;font-size:13px;display:none;max-height:220px;overflow:auto}
+  .cg-detail.on{display:block}
+  .cg-d-h{font-weight:700;color:var(--ink);margin-bottom:6px;display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+  .cg-d-badge{font-size:11px;color:#0f1117;padding:2px 9px;border-radius:999px;font-weight:700}
+  .cg-d-b{color:var(--dim);white-space:pre-wrap;line-height:1.55}
   .cg-legend{display:flex;gap:14px;flex-wrap:wrap;margin-bottom:10px}
   .cg-legend span{font-size:12px;color:var(--dim);display:inline-flex;align-items:center;gap:6px}
   .cg-legend i{width:10px;height:10px;border-radius:3px;display:inline-block}
@@ -140,6 +146,7 @@
     </div>
     <div class="cg-legend" id="cg-legend"></div>
     <div id="cgraph"></div>
+    <div id="cg-detail" class="cg-detail"></div>
     <div class="muted" id="cgraph-note" style="margin-top:8px">Hover a concept to highlight its links · click to filter the coach to that subject.</div>
   </div>
 
@@ -320,6 +327,20 @@ function drawConceptGraph(){
     const [sm,lg]=Object.keys(x).length<=Object.keys(y).length?[x,y]:[y,x];
     for(const t in sm) s+=sm[t]*(lg[t]||0); return s; }
   const CG_SUBS=[...new Set(N.map(n=>n.subject))];
+  // key content per concept: the opening passage of its note (definition / key
+  // point). CC0 text already embedded in the index — safe to surface.
+  const NOTE0={};
+  CHUNKS.forEach(c=>{ const m=/#p(\d+)/.exec(c.chunk_id||""); const idx=m?+m[1]:0;
+    if(!(c.doc_id in NOTE0) || idx<NOTE0[c.doc_id].idx) NOTE0[c.doc_id]={idx,text:c.text,source:c.source,license:c.license}; });
+  function showDetail(k){ const box=document.getElementById("cg-detail"); if(!box) return; box.classList.add("on");
+    if(k===CG_Q){ box.innerHTML=`<div class="cg-d-h"><span class="cg-d-badge" style="background:${CG_COL.query}">question</span>${esc(qInfo?qInfo.label:"本題")}</div>`+
+        `<div class="cg-d-b">本題題幹 · 下方各概念是這題檢索到的重點知識來源，離題幹越近＝檢索關聯越強。</div>`; return; }
+    const nf=info(k); const rec=NOTE0[k]; const t=rec?rec.text:"";
+    box.innerHTML=`<div class="cg-d-h"><span class="cg-d-badge" style="background:${CG_COL[nf.subject]||"#9aa3b2"}">${esc(nf.subject)}</span>${esc(nf.label)}`+
+      (rec&&rec.license?` <span class="muted" style="font-weight:400">· ${esc(rec.license)}</span>`:"")+`</div>`+
+      `<div class="cg-d-b">${esc(t)}</div>`;
+    if(window.renderMathInElement) mathRender(box);
+  }
 
   // all node state is keyed by STRING key (doc_id, or CG_Q for the question node).
   let pos={}, vel={}, orig={}, curNodes=[], curEdges=[], elmap={}, lineEls=[], restLen=[], adj={}, REP=0;
@@ -420,7 +441,7 @@ function drawConceptGraph(){
       const gx=(vb.x-view.tx)/view.k, gy=(vb.y-view.ty)/view.k, f=e.deltaY<0?1.15:1/1.15;
       view.k=Math.max(0.3,Math.min(6,view.k*f)); view.tx=vb.x-gx*view.k; view.ty=vb.y-gy*view.k; applyView(); },{passive:false});
     svg.addEventListener("pointerdown",e=>{ const ng=e.target.closest(".cg-node"), vb=toVB(e);
-      if(ng){ const k=ng.dataset.i; drag={type:"node",k,moved:false}; pinned=k; vel[k].x=vel[k].y=0; focus(k); }
+      if(ng){ const k=ng.dataset.i; drag={type:"node",k,moved:false}; pinned=k; vel[k].x=vel[k].y=0; focus(k); showDetail(k); }
       else { drag={type:"pan",x:vb.x,y:vb.y,tx0:view.tx,ty0:view.ty}; }
       svg.setPointerCapture(e.pointerId); e.preventDefault(); });
     svg.addEventListener("pointermove",e=>{ if(!drag) return; const vb=toVB(e);
@@ -435,7 +456,7 @@ function drawConceptGraph(){
     svg.addEventListener("dblclick",()=>{ view={k:1,tx:0,ty:0}; applyView();
       curNodes.forEach(k=>{ pos[k].x=orig[k].x; pos[k].y=orig[k].y; vel[k].x=vel[k].y=0; }); kick(); });
     [...svg.querySelectorAll(".cg-node")].forEach(el=>{ const k=el.dataset.i;
-      el.addEventListener("mouseenter",()=>{ if(!drag)focus(k); }); el.addEventListener("mouseleave",()=>{ if(!drag)reset(); }); });
+      el.addEventListener("mouseenter",()=>{ if(!drag){ focus(k); showDetail(k); } }); el.addEventListener("mouseleave",()=>{ if(!drag)reset(); }); });
   }
 
   function rebuild(){ pinned=null; if(raf){cancelAnimationFrame(raf);raf=null;} view={k:1,tx:0,ty:0}; buildLists(); renderDOM(); kick(); }
@@ -450,7 +471,7 @@ function drawConceptGraph(){
   btnAll.addEventListener("click",showAll);
   btnQ.addEventListener("click",showQuestion);
   document.getElementById("cgraph-note").textContent=
-    "本題模式:題幹在中心、概念即時排布 · 拖曳概念(相連跟著動) · 滾輪縮放 · 拖背景平移 · 雙擊重整版面";
+    "拖曳或移到概念 → 下方顯示該概念的重點知識 · 相連概念跟著動 · 滾輪縮放 · 拖背景平移 · 雙擊重整版面";
 
   // Coach hook: each asked question REGENERATES the graph live from its stem.
   window.__cgShowQuestion=function(cites,label){
