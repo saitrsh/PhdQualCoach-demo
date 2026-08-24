@@ -62,6 +62,12 @@
   .cg-legend{display:flex;gap:14px;flex-wrap:wrap;margin-bottom:10px}
   .cg-legend span{font-size:12px;color:var(--dim);display:inline-flex;align-items:center;gap:6px}
   .cg-legend i{width:10px;height:10px;border-radius:3px;display:inline-block}
+  #cg-controls{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:10px}
+  .cg-tab{padding:5px 12px;font-size:12px;border-radius:8px;border:1px solid var(--edge);
+    background:var(--panel2);color:var(--dim);font-weight:600}
+  .cg-tab-on{border-color:var(--accent);background:var(--accent);color:#fff}
+  .cg-tab:disabled{opacity:.5;cursor:not-allowed}
+  #cg-caption{font-size:12px}
 </style>
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
 <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
@@ -126,6 +132,11 @@
 
   <div class="card">
     <h2>Concept knowledge graph · notes linked by shared vocabulary</h2>
+    <div id="cg-controls">
+      <button id="cg-all" class="cg-tab cg-tab-on">總圖 · all concepts</button>
+      <button id="cg-q" class="cg-tab" disabled>本題概念圖</button>
+      <span class="muted" id="cg-caption">Ask a question to see just that question's concepts.</span>
+    </div>
     <div class="cg-legend" id="cg-legend"></div>
     <div id="cgraph"></div>
     <div class="muted" id="cgraph-note" style="margin-top:8px">Hover a concept to highlight its links · click to filter the coach to that subject.</div>
@@ -222,6 +233,8 @@ function render(q){
   window.__lastQuery=q;
   const la=document.getElementById("llmanswer"); la.style.display="none"; la.textContent="";
   document.getElementById("genstatus").textContent="";
+  // feed the concept graph this question's retrieved concepts (per-question graph)
+  if(window.__cgShowQuestion) window.__cgShowQuestion(r.cites.map(c=>c.doc_id), q);
 }
 
 // Server-side LLM generation (POST /api/ask). Only works when the page is served
@@ -296,127 +309,136 @@ function drawConceptGraph(){
   const g=DATA.graph; const host=document.getElementById("cgraph");
   if(!g||!g.nodes.length){ if(host)host.innerHTML='<div class="muted">no graph data</div>'; return; }
   const W=1000,H=620,N=g.nodes;
-  // live positions (mutated by dragging); start from the server layout.
-  const P=N.map(n=>({x:n.x,y:n.y}));
-  const adj=N.map(()=>[]);
-  const incident=N.map(()=>[]);            // edge indices touching each node
-  const edges=g.edges.map(([i,j,w],e)=>{ adj[i].push(j); adj[j].push(i);
-    incident[i].push(e); incident[j].push(e);
-    const a=P[i],b=P[j];
-    return `<line class="cg-edge" data-e="${e}" data-i="${i}" data-j="${j}" x1="${a.x}" y1="${a.y}" x2="${b.x}" y2="${b.y}" stroke-width="${(0.6+Math.min(w,0.5)*2).toFixed(2)}" stroke-opacity="0.5"></line>`;
-  }).join("");
-  // each node is a <g translate(x,y)> holding a circle + always-on label, so the
-  // label rides along when the node is dragged.
-  const nodesSvg=N.map((n,i)=>{
-    const r=(5+Math.min(n.deg,6)).toFixed(1);
-    return `<g class="cg-node" data-i="${i}" transform="translate(${n.x},${n.y})">`+
-      `<circle r="${r}" fill="${CG_COL[n.subject]||"#9aa3b2"}" stroke="#0f1117" stroke-width="1.5"></circle>`+
-      `<text class="cg-label" x="${(+r+4).toFixed(1)}" y="3">${esc(n.label)}</text>`+
-      `<title>${esc(n.label)} · ${esc(n.subject)} · ${n.deg} links</title></g>`;
-  }).join("");
-  host.innerHTML=`<svg id="cg-svg" viewBox="0 0 ${W} ${H}" role="img" aria-label="concept knowledge graph">`+
-    `<g id="cg-vp"><g id="cg-edges">${edges}</g><g id="cg-nodes">${nodesSvg}</g></g></svg>`;
-  const subs=[...new Set(N.map(n=>n.subject))];
-  document.getElementById("cg-legend").innerHTML=subs.map(s=>
-    `<span><i style="background:${CG_COL[s]||"#9aa3b2"}"></i>${esc(s)}</span>`).join("")+
-    `<span style="margin-left:auto">${N.length} notes · ${g.edges.length} links</span>`;
-  document.getElementById("cgraph-note").textContent=
-    "拖曳節點移動 · 滾輪縮放 · 拖背景平移 · 點節點篩選 coach · 雙擊背景重置";
+  const IDX={}; N.forEach((n,i)=>IDX[n.id]=i);
+  // aggregated, normalized note vectors — to derive a question's sub-graph edges.
+  const NV={};
+  CHUNKS.forEach(c=>{ const v=NV[c.doc_id]||(NV[c.doc_id]={}); for(const t in c.vector) v[t]=(v[t]||0)+c.vector[t]; });
+  for(const d in NV){ let s=0; for(const t in NV[d]) s+=NV[d][t]*NV[d][t]; s=Math.sqrt(s)||1; for(const t in NV[d]) NV[d][t]/=s; }
+  function ncos(da,db){ const x=NV[da],y=NV[db]; if(!x||!y) return 0; let s=0;
+    const [sm,lg]=Object.keys(x).length<=Object.keys(y).length?[x,y]:[y,x];
+    for(const t in sm) s+=sm[t]*(lg[t]||0); return s; }
 
-  const svg=host.querySelector("#cg-svg");
-  const vp=svg.querySelector("#cg-vp");
-  const lineEls=[...svg.querySelectorAll(".cg-edge")];
-  const nodeEls=[...svg.querySelectorAll(".cg-node")];
+  // per-node state keyed by GLOBAL index, seeded from the server layout.
+  const pos={}, vel={}, orig={};
+  N.forEach((n,i)=>{ pos[i]={x:n.x,y:n.y}; vel[i]={x:0,y:0}; orig[i]={x:n.x,y:n.y}; });
+  const CG_SUBS=[...new Set(N.map(n=>n.subject))];
 
-  // pan/zoom via a viewport transform in viewBox units.
-  let view={k:1,tx:0,ty:0};
-  function applyView(){ vp.setAttribute("transform",`translate(${view.tx},${view.ty}) scale(${view.k})`); }
-  // client px -> viewBox units (accounts for the SVG's on-screen scale)
-  function toVB(evt){ const ctm=svg.getScreenCTM(); const p=svg.createSVGPoint();
-    p.x=evt.clientX; p.y=evt.clientY; const q=p.matrixTransform(ctm.inverse()); return q; }
-  // viewBox units -> graph (pre-transform) coords
-  function toGraph(vbx,vby){ return {x:(vbx-view.tx)/view.k, y:(vby-view.ty)/view.k}; }
-
-  svg.addEventListener("wheel",e=>{ e.preventDefault();
-    const vb=toVB(e); const gx=(vb.x-view.tx)/view.k, gy=(vb.y-view.ty)/view.k;
-    const f=e.deltaY<0?1.15:1/1.15;
-    view.k=Math.max(0.3,Math.min(6,view.k*f));
-    view.tx=vb.x-gx*view.k; view.ty=vb.y-gy*view.k; applyView();
-  },{passive:false});
-
-  // --- live spring simulation: dragging a concept tugs its linked concepts ---
-  // Rest state = the server layout: each edge's rest length is its initial
-  // length and each node is lightly anchored to its start, so with nothing
-  // dragged the net force is ~0 (no jump). Dragging pins a node; springs pull
-  // its neighbours, propagating through the graph; on release everything relaxes
-  // back. Runs via rAF only while there is motion, then stops (idle = no CPU).
-  const ORIG=N.map(n=>({x:n.x,y:n.y}));
-  const Vel=N.map(()=>({x:0,y:0}));
-  const restLen=g.edges.map(([i,j])=> Math.hypot(N[i].x-N[j].x,N[i].y-N[j].y)||1);
+  let curNodes=[], curEdges=[], elmap={}, lineEls=[], restLen=[], adj={};
+  let svg, vp, view={k:1,tx:0,ty:0}, pinned=null, raf=null, drag=null;
+  let mode={type:"all"}, lastQ=null;
   const KS=0.09, KA=0.02, DAMP=0.80;
-  let pinned=null, raf=null;
-  function redrawAll(){
-    for(let k=0;k<P.length;k++)
-      nodeEls[k].setAttribute("transform",`translate(${P[k].x.toFixed(1)},${P[k].y.toFixed(1)})`);
-    g.edges.forEach(([i,j],e)=>{ const el=lineEls[e];
-      el.setAttribute("x1",P[i].x.toFixed(1)); el.setAttribute("y1",P[i].y.toFixed(1));
-      el.setAttribute("x2",P[j].x.toFixed(1)); el.setAttribute("y2",P[j].y.toFixed(1)); });
+
+  // Build the node/edge lists for the current mode. "all" = the whole graph;
+  // "question" = only the notes that question retrieved, with edges = the global
+  // links among them PLUS any extra shared-vocabulary links within the subset
+  // (so a question's few concepts still show how they relate).
+  function buildLists(){
+    if(mode.type==="all"){
+      curNodes=N.map((n,i)=>i); curEdges=g.edges.map(e=>[e[0],e[1],e[2]]);
+    } else {
+      curNodes=[...new Set(mode.ids.map(d=>IDX[d]).filter(i=>i!==undefined))];
+      const set=new Set(curNodes), seen=new Set(); curEdges=[];
+      const key=(i,j)=> i<j? i+"_"+j : j+"_"+i;
+      g.edges.forEach(([i,j,w])=>{ if(set.has(i)&&set.has(j)){ curEdges.push([i,j,w]); seen.add(key(i,j)); } });
+      for(let a=0;a<curNodes.length;a++) for(let b=a+1;b<curNodes.length;b++){
+        const i=curNodes[a], j=curNodes[b]; if(seen.has(key(i,j))) continue;
+        const c=ncos(N[i].id,N[j].id); if(c>=0.03){ curEdges.push([i,j,+c.toFixed(4)]); seen.add(key(i,j)); } }
+    }
+    adj={}; curNodes.forEach(i=>{ adj[i]=[]; pos[i]={x:orig[i].x,y:orig[i].y}; vel[i]={x:0,y:0}; });
+    restLen=curEdges.map(([i,j])=>{ adj[i].push(j); adj[j].push(i);
+      return Math.hypot(orig[i].x-orig[j].x,orig[i].y-orig[j].y)||1; });
   }
-  function physics(){
-    const F=P.map(()=>({x:0,y:0}));
-    g.edges.forEach(([i,j],e)=>{ const dx=P[j].x-P[i].x, dy=P[j].y-P[i].y;
-      const d=Math.hypot(dx,dy)||1, f=KS*(d-restLen[e]), ux=dx/d, uy=dy/d;
-      F[i].x+=ux*f; F[i].y+=uy*f; F[j].x-=ux*f; F[j].y-=uy*f; });
-    for(let k=0;k<P.length;k++){ F[k].x+=KA*(ORIG[k].x-P[k].x); F[k].y+=KA*(ORIG[k].y-P[k].y); }
+
+  function renderDOM(){
+    const edgesSvg=curEdges.map(([i,j,w],e)=>
+      `<line class="cg-edge" data-e="${e}" data-i="${i}" data-j="${j}" x1="${pos[i].x}" y1="${pos[i].y}" x2="${pos[j].x}" y2="${pos[j].y}" stroke-width="${(0.6+Math.min(w,0.5)*2).toFixed(2)}" stroke-opacity="0.5"></line>`).join("");
+    const nodesSvg=curNodes.map(i=>{ const n=N[i], deg=(adj[i]||[]).length, r=(5+Math.min(deg,6)).toFixed(1);
+      return `<g class="cg-node" data-i="${i}" transform="translate(${pos[i].x},${pos[i].y})">`+
+        `<circle r="${r}" fill="${CG_COL[n.subject]||"#9aa3b2"}" stroke="#0f1117" stroke-width="1.5"></circle>`+
+        `<text class="cg-label" x="${(+r+4).toFixed(1)}" y="3">${esc(n.label)}</text>`+
+        `<title>${esc(n.label)} · ${esc(n.subject)} · ${deg} links</title></g>`; }).join("");
+    host.innerHTML=`<svg id="cg-svg" viewBox="0 0 ${W} ${H}" role="img" aria-label="concept knowledge graph">`+
+      `<g id="cg-vp"><g id="cg-edges">${edgesSvg}</g><g id="cg-nodes">${nodesSvg}</g></g></svg>`;
+    svg=host.querySelector("#cg-svg"); vp=svg.querySelector("#cg-vp");
+    lineEls=[...svg.querySelectorAll(".cg-edge")];
+    elmap={}; [...svg.querySelectorAll(".cg-node")].forEach(el=>{ elmap[+el.dataset.i]=el; });
+    applyView(); wireEvents();
+    document.getElementById("cg-legend").innerHTML=CG_SUBS.map(s=>
+      `<span><i style="background:${CG_COL[s]||"#9aa3b2"}"></i>${esc(s)}</span>`).join("")+
+      `<span style="margin-left:auto">${curNodes.length} notes · ${curEdges.length} links</span>`;
+  }
+
+  function applyView(){ if(vp) vp.setAttribute("transform",`translate(${view.tx},${view.ty}) scale(${view.k})`); }
+  function toVB(evt){ const ctm=svg.getScreenCTM(); const p=svg.createSVGPoint();
+    p.x=evt.clientX; p.y=evt.clientY; return p.matrixTransform(ctm.inverse()); }
+  function toGraph(vx,vy){ return {x:(vx-view.tx)/view.k, y:(vy-view.ty)/view.k}; }
+
+  function redraw(){ curNodes.forEach(i=> elmap[i].setAttribute("transform",`translate(${pos[i].x.toFixed(1)},${pos[i].y.toFixed(1)})`));
+    curEdges.forEach(([i,j],e)=>{ const el=lineEls[e];
+      el.setAttribute("x1",pos[i].x.toFixed(1)); el.setAttribute("y1",pos[i].y.toFixed(1));
+      el.setAttribute("x2",pos[j].x.toFixed(1)); el.setAttribute("y2",pos[j].y.toFixed(1)); }); }
+  function physics(){ const F={}; curNodes.forEach(i=>F[i]={x:0,y:0});
+    curEdges.forEach(([i,j],e)=>{ const dx=pos[j].x-pos[i].x, dy=pos[j].y-pos[i].y, d=Math.hypot(dx,dy)||1,
+      f=KS*(d-restLen[e]), ux=dx/d, uy=dy/d; F[i].x+=ux*f; F[i].y+=uy*f; F[j].x-=ux*f; F[j].y-=uy*f; });
+    curNodes.forEach(i=>{ F[i].x+=KA*(orig[i].x-pos[i].x); F[i].y+=KA*(orig[i].y-pos[i].y); });
     let energy=0;
-    for(let k=0;k<P.length;k++){ if(k===pinned) continue;
-      Vel[k].x=(Vel[k].x+F[k].x)*DAMP; Vel[k].y=(Vel[k].y+F[k].y)*DAMP;
-      P[k].x+=Vel[k].x; P[k].y+=Vel[k].y; energy+=Vel[k].x*Vel[k].x+Vel[k].y*Vel[k].y; }
-    redrawAll();
-    if(pinned!==null || energy>0.02){ raf=requestAnimationFrame(physics); } else { raf=null; }
-  }
+    curNodes.forEach(i=>{ if(i===pinned) return; vel[i].x=(vel[i].x+F[i].x)*DAMP; vel[i].y=(vel[i].y+F[i].y)*DAMP;
+      pos[i].x+=vel[i].x; pos[i].y+=vel[i].y; energy+=vel[i].x*vel[i].x+vel[i].y*vel[i].y; });
+    redraw();
+    if(pinned!==null || energy>0.02){ raf=requestAnimationFrame(physics); } else { raf=null; } }
   function kick(){ if(raf===null) raf=requestAnimationFrame(physics); }
 
-  let drag=null;  // {type:'node',i} | {type:'pan'}
-  function onDown(e){
-    const ng=e.target.closest(".cg-node");
-    const vb=toVB(e);
-    if(ng){ const i=+ng.dataset.i; drag={type:"node",i,moved:false}; pinned=i; Vel[i].x=Vel[i].y=0; focus(i); }
-    else { drag={type:"pan",x:vb.x,y:vb.y,tx0:view.tx,ty0:view.ty}; }
-    svg.setPointerCapture(e.pointerId); e.preventDefault();
-  }
-  function onMove(e){ if(!drag) return; const vb=toVB(e);
-    if(drag.type==="node"){ drag.moved=true; const gp=toGraph(vb.x,vb.y);
-      P[drag.i].x=gp.x; P[drag.i].y=gp.y; kick(); }        // pinned node follows pointer; springs do the rest
-    else { view.tx=drag.tx0+(vb.x-drag.x); view.ty=drag.ty0+(vb.y-drag.y); applyView(); }
-  }
-  function onUp(e){ if(!drag) return;
-    if(drag.type==="node"){
-      if(!drag.moved){ // a click, not a drag → filter the coach
-        const t=N[drag.i].subject; const ts=document.getElementById("topic");
-        if(ts){ts.value=t; ts.dispatchEvent(new Event("change"));}
-        document.getElementById("q").value=N[drag.i].label; window.scrollTo({top:0,behavior:"smooth"}); }
-      pinned=null; kick(); reset();                        // release → graph relaxes back
-    }
-    drag=null; try{svg.releasePointerCapture(e.pointerId);}catch(_){}
-  }
-  svg.addEventListener("pointerdown",onDown);
-  svg.addEventListener("pointermove",onMove);
-  svg.addEventListener("pointerup",onUp);
-  svg.addEventListener("dblclick",()=>{ view={k:1,tx:0,ty:0}; applyView();
-    for(let k=0;k<P.length;k++){ P[k].x=ORIG[k].x; P[k].y=ORIG[k].y; Vel[k].x=Vel[k].y=0; }
-    redrawAll(); });
+  function focus(i){ const keep=new Set([i,...(adj[i]||[])]);
+    curNodes.forEach(k=> elmap[k].setAttribute("opacity", keep.has(k)?"1":"0.18"));
+    lineEls.forEach(el=>{ const on=(+el.dataset.i===i||+el.dataset.j===i);
+      el.setAttribute("stroke-opacity",on?"0.95":"0.06"); el.setAttribute("stroke",on?(CG_COL[N[i].subject]||"#9aa3b2"):"#39415a"); }); }
+  function reset(){ curNodes.forEach(k=> elmap[k].setAttribute("opacity","1"));
+    lineEls.forEach(el=>{ el.setAttribute("stroke-opacity","0.5"); el.setAttribute("stroke","#39415a"); }); }
 
-  function focus(i){ const keep=new Set([i,...adj[i]]);
-    nodeEls.forEach((el,k)=>el.setAttribute("opacity", keep.has(k)?"1":"0.18"));
-    lineEls.forEach(el=>{const on=(+el.dataset.i===i||+el.dataset.j===i);
-      el.setAttribute("stroke-opacity",on?"0.95":"0.06");
-      el.setAttribute("stroke",on?(CG_COL[N[i].subject]||"#9aa3b2"):"#39415a");});
+  function wireEvents(){
+    svg.addEventListener("wheel",e=>{ e.preventDefault(); const vb=toVB(e);
+      const gx=(vb.x-view.tx)/view.k, gy=(vb.y-view.ty)/view.k, f=e.deltaY<0?1.15:1/1.15;
+      view.k=Math.max(0.3,Math.min(6,view.k*f)); view.tx=vb.x-gx*view.k; view.ty=vb.y-gy*view.k; applyView(); },{passive:false});
+    svg.addEventListener("pointerdown",e=>{ const ng=e.target.closest(".cg-node"), vb=toVB(e);
+      if(ng){ const i=+ng.dataset.i; drag={type:"node",i,moved:false}; pinned=i; vel[i].x=vel[i].y=0; focus(i); }
+      else { drag={type:"pan",x:vb.x,y:vb.y,tx0:view.tx,ty0:view.ty}; }
+      svg.setPointerCapture(e.pointerId); e.preventDefault(); });
+    svg.addEventListener("pointermove",e=>{ if(!drag) return; const vb=toVB(e);
+      if(drag.type==="node"){ drag.moved=true; const gp=toGraph(vb.x,vb.y); pos[drag.i].x=gp.x; pos[drag.i].y=gp.y; kick(); }
+      else { view.tx=drag.tx0+(vb.x-drag.x); view.ty=drag.ty0+(vb.y-drag.y); applyView(); } });
+    svg.addEventListener("pointerup",e=>{ if(!drag) return;
+      if(drag.type==="node"){ if(!drag.moved){ const t=N[drag.i].subject, ts=document.getElementById("topic");
+          if(ts){ts.value=t; ts.dispatchEvent(new Event("change"));}
+          document.getElementById("q").value=N[drag.i].label; window.scrollTo({top:0,behavior:"smooth"}); }
+        pinned=null; kick(); reset(); }
+      drag=null; try{svg.releasePointerCapture(e.pointerId);}catch(_){} });
+    svg.addEventListener("dblclick",()=>{ view={k:1,tx:0,ty:0}; applyView();
+      curNodes.forEach(i=>{ pos[i].x=orig[i].x; pos[i].y=orig[i].y; vel[i].x=vel[i].y=0; }); redraw(); });
+    [...svg.querySelectorAll(".cg-node")].forEach(el=>{ const i=+el.dataset.i;
+      el.addEventListener("mouseenter",()=>{ if(!drag)focus(i); }); el.addEventListener("mouseleave",()=>{ if(!drag)reset(); }); });
   }
-  function reset(){ nodeEls.forEach(el=>el.setAttribute("opacity","1"));
-    lineEls.forEach(el=>{el.setAttribute("stroke-opacity","0.5");el.setAttribute("stroke","#39415a");}); }
-  nodeEls.forEach((el,i)=>{ el.addEventListener("mouseenter",()=>{ if(!drag)focus(i); });
-    el.addEventListener("mouseleave",()=>{ if(!drag)reset(); }); });
+
+  function rebuild(){ pinned=null; if(raf){cancelAnimationFrame(raf);raf=null;} view={k:1,tx:0,ty:0}; buildLists(); renderDOM(); }
+
+  const btnAll=document.getElementById("cg-all"), btnQ=document.getElementById("cg-q"), cap=document.getElementById("cg-caption");
+  function markTab(active){ (active===btnAll?btnAll:btnQ).classList.add("cg-tab-on"); (active===btnAll?btnQ:btnAll).classList.remove("cg-tab-on"); }
+  function showAll(){ mode={type:"all"}; rebuild(); markTab(btnAll); cap.textContent="總圖 · "+N.length+" concepts · "+g.edges.length+" links"; }
+  function showQuestion(){ if(!lastQ) return; mode={type:"question",ids:lastQ.ids}; rebuild(); markTab(btnQ);
+    cap.textContent="本題概念 · "+curNodes.length+" notes · "+(lastQ.label.length>44?lastQ.label.slice(0,44)+"…":lastQ.label); }
+  btnAll.addEventListener("click",showAll);
+  btnQ.addEventListener("click",showQuestion);
+  document.getElementById("cgraph-note").textContent=
+    "拖曳概念(相連概念跟著連動) · 滾輪縮放 · 拖背景平移 · 點概念篩選 coach · 雙擊背景重置";
+
+  // Coach hook: when a question is asked, the graph can show just that question's
+  // retrieved concepts (per-question concept graph). Enables the 本題 tab.
+  window.__cgShowQuestion=function(docIds,label){
+    const ids=[...new Set(docIds)].filter(d=>IDX[d]!==undefined);
+    if(!ids.length) return;
+    lastQ={ids,label:label||""}; btnQ.disabled=false; showQuestion();
+  };
+
+  showAll();  // initial paint = the whole graph
 }
 drawConceptGraph();
 
