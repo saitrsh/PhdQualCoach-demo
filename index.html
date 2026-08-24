@@ -359,6 +359,9 @@ function drawConceptGraph(){
     const [sm,lg]=Object.keys(x).length<=Object.keys(y).length?[x,y]:[y,x];
     for(const t in sm) s+=sm[t]*(lg[t]||0); return s; }
   const CG_SUBS=[...new Set(N.map(n=>n.subject))];
+  // global concept adjacency (by doc_id) for multi-layer BFS expansion.
+  const gAdj={}; N.forEach(n=>{ gAdj[n.id]=[]; });
+  g.edges.forEach(([i,j,w])=>{ gAdj[N[i].id].push([N[j].id,w]); gAdj[N[j].id].push([N[i].id,w]); });
   // key content per concept: the opening passage of its note (definition / key
   // point). CC0 text already embedded in the index — safe to surface.
   const NOTE0={};
@@ -377,8 +380,8 @@ function drawConceptGraph(){
   // all node state is keyed by STRING key (doc_id, or CG_Q for the question node).
   let pos={}, vel={}, orig={}, curNodes=[], curEdges=[], elmap={}, lineEls=[], restLen=[], adj={}, REP=0;
   let qInfo=null, svg, vp, view={k:1,tx:0,ty:0}, pinned=null, raf=null, drag=null;
-  let mode={type:"all"}, lastQ=null;
-  const KS=0.09, KA=0.02, DAMP=0.80;
+  let mode={type:"all"}, lastQ=null, layerOf={}, qRings=[];
+  const KS=0.09, DAMP=0.80; let KA=0.02;
   function info(k){ return k===CG_Q ? qInfo : KINFO[k]; }
 
   // "all" = the whole precomputed graph at its deterministic server layout.
@@ -393,27 +396,53 @@ function drawConceptGraph(){
       curNodes.forEach(k=>{ orig[k]={x:KINFO[k].x,y:KINFO[k].y}; });
       REP=0;
     } else {
+      // BFS from the question outward through the concept graph → concentric
+      // layers (≥4): layer 1 = the concepts this question retrieved, layer 2..D
+      // = their neighbours, their neighbours' neighbours, … So the graph shows
+      // not just the direct hits but the surrounding conceptual neighbourhood.
       const items=mode.ids.map(o=>(o&&o.id)?o:{id:o,score:null}).filter(o=>KINFO[o.id]);
-      const ids=[...new Set(items.map(o=>o.id))];
+      const seedIds=[...new Set(items.map(o=>o.id))];
       const scoreOf={}; items.forEach(o=>{ if(o.score!=null) scoreOf[o.id]=o.score; });
-      curNodes=[CG_Q, ...ids];
-      // fresh radial seed: question in the centre, concepts on a ring.
-      const cx=W/2, cy=H/2, R=Math.min(230, 90+ids.length*18);
+      const MAXD=4;
+      layerOf={}; layerOf[CG_Q]=0;
+      const layers=[[CG_Q]]; let frontier=[];
+      seedIds.forEach(d=>{ if(!(d in layerOf)){ layerOf[d]=1; frontier.push(d); } });
+      layers.push(frontier.slice());
+      for(let L=2; L<=MAXD; L++){
+        const next=[];
+        // strongest links first, capped per layer so deep layers stay readable
+        frontier.forEach(u=>{ (gAdj[u]||[]).slice().sort((x,y)=>y[1]-x[1]).forEach(([v])=>{
+          if(!(v in layerOf)){ layerOf[v]=L; next.push(v); } }); });
+        if(!next.length) break;
+        layers.push(next); frontier=next;
+      }
+      const conceptIds=Object.keys(layerOf).filter(k=>k!==CG_Q);
+      curNodes=[CG_Q, ...conceptIds];
+      // concentric-ring layout, radius grows per layer; layer-1 radius also
+      // shrinks with retrieval score (stronger hit sits closer to the question).
+      const cx=W/2, cy=H/2, maxL=layers.length-1;
+      const step=Math.min(135,(Math.min(W,H)/2-46)/Math.max(maxL,1));
+      qRings=[]; for(let L=1;L<=maxL;L++) qRings.push(step*L);
       orig[CG_Q]={x:cx,y:cy};
-      ids.forEach((d,idx)=>{ const a=-Math.PI/2 + 2*Math.PI*idx/Math.max(ids.length,1);
-        orig[d]={x:cx+R*Math.cos(a), y:cy+R*Math.sin(a)}; });
-      const seen=new Set(), key=(a,b)=> a<b?a+"|"+b:b+"|"+a;
-      curEdges=[];
-      ids.forEach(d=>{ const sc=scoreOf[d]; curEdges.push([CG_Q,d, sc!=null?Math.max(0.15,Math.min(sc,1)):0.5]); seen.add(key(CG_Q,d)); });
-      for(let a=0;a<ids.length;a++) for(let b=a+1;b<ids.length;b++){ const i=ids[a],j=ids[b];
-        if(seen.has(key(i,j))) continue; const c=ncos(i,j); if(c>=0.03){ curEdges.push([i,j,+c.toFixed(4)]); seen.add(key(i,j)); } }
-      REP=2800;
+      for(let L=1;L<layers.length;L++){ const ring=layers[L];
+        ring.forEach((d,idx)=>{ const a=-Math.PI/2 + 2*Math.PI*idx/ring.length + L*0.5;
+          const sc=(L===1&&scoreOf[d]!=null)?Math.min(scoreOf[d],1):0;
+          const R=(L===1)? step*(1.15-0.4*sc) : step*L;
+          orig[d]={x:cx+R*Math.cos(a), y:cy+R*Math.sin(a)}; }); }
+      const seen=new Set(), key=(a,b)=> a<b?a+"|"+b:b+"|"+a; curEdges=[];
+      layers[1].forEach(d=>{ const sc=scoreOf[d]; curEdges.push([CG_Q,d, sc!=null?Math.max(0.15,Math.min(sc,1)):0.5]); seen.add(key(CG_Q,d)); });
+      const inSet=new Set(conceptIds);
+      g.edges.forEach(([i,j,w])=>{ const a=N[i].id,b=N[j].id;
+        if(inSet.has(a)&&inSet.has(b)&&!seen.has(key(a,b))){ curEdges.push([a,b,w]); seen.add(key(a,b)); } });
+      REP=1600; KA=0.05;   // hold the ring structure, with a little life
     }
+    if(mode.type==="all"){ REP=0; KA=0.02; qRings=[]; }
     adj={}; curNodes.forEach(k=>{ adj[k]=[]; pos[k]={x:orig[k].x,y:orig[k].y}; vel[k]={x:0,y:0}; });
-    restLen=curEdges.map(([a,b,w])=>{ adj[a].push(b); adj[b].push(a);
-      if(mode.type==="all") return Math.hypot(orig[a].x-orig[b].x,orig[a].y-orig[b].y)||1;
-      if(a===CG_Q||b===CG_Q) return 160-80*Math.min(w,1);   // stronger retrieval → closer to the question
-      return 120-55*Math.min(w,1); });                       // stronger shared vocab → closer
+    // rest length = the seed distance (the layered layout is the equilibrium),
+    // so springs animate gently around the multi-ring structure rather than
+    // collapsing it.
+    restLen=curEdges.map(([a,b])=>{ adj[a].push(b); adj[b].push(a);
+      return Math.hypot(orig[a].x-orig[b].x,orig[a].y-orig[b].y)||1; });
   }
 
   function renderDOM(){
@@ -425,8 +454,12 @@ function drawConceptGraph(){
         `<circle r="${r.toFixed(1)}" fill="${CG_COL[nf.subject]||"#9aa3b2"}" stroke="#0f1117" stroke-width="${isQ?2.5:1.5}"></circle>`+
         `<text class="cg-label${isQ?" cg-qlabel":""}" x="${(r+4).toFixed(1)}" y="3">${esc(lab)}</text>`+
         `<title>${esc(nf.label)} · ${esc(nf.subject)}${isQ?"":" · "+deg+" links"}</title></g>`; }).join("");
+    // faint concentric guides mark the BFS layers (層) in question mode.
+    const ringsSvg=(mode.type==="question"&&qRings.length)? qRings.map((R,li)=>
+      `<circle cx="${W/2}" cy="${H/2}" r="${R.toFixed(1)}" fill="none" stroke="#2a2f3e" stroke-dasharray="3 6"></circle>`+
+      `<text x="${W/2+R.toFixed(1)}" y="${H/2-3}" fill="#4a5064" font-size="10">L${li+1}</text>`).join(""):"";
     host.innerHTML=`<svg id="cg-svg" viewBox="0 0 ${W} ${H}" role="img" aria-label="concept knowledge graph">`+
-      `<g id="cg-vp"><g id="cg-edges">${edgesSvg}</g><g id="cg-nodes">${nodesSvg}</g></g></svg>`;
+      `<g id="cg-vp"><g id="cg-rings">${ringsSvg}</g><g id="cg-edges">${edgesSvg}</g><g id="cg-nodes">${nodesSvg}</g></g></svg>`;
     svg=host.querySelector("#cg-svg"); vp=svg.querySelector("#cg-vp");
     lineEls=[...svg.querySelectorAll(".cg-edge")];
     elmap={}; [...svg.querySelectorAll(".cg-node")].forEach(el=>{ elmap[el.dataset.i]=el; });
@@ -435,7 +468,7 @@ function drawConceptGraph(){
     document.getElementById("cg-legend").innerHTML=CG_SUBS.map(s=>
       `<span><i style="background:${CG_COL[s]||"#9aa3b2"}"></i>${esc(s)}</span>`).join("")+
       (mode.type==="question"?`<span><i style="background:${CG_COL.query}"></i>question</span>`:"")+
-      `<span style="margin-left:auto">${nConcept} notes · ${curEdges.length} links</span>`;
+      `<span style="margin-left:auto">${mode.type==="question"?qRings.length+" layers · ":""}${nConcept} notes · ${curEdges.length} links</span>`;
   }
 
   function applyView(){ if(vp) vp.setAttribute("transform",`translate(${view.tx},${view.ty}) scale(${view.k})`); }
@@ -505,7 +538,7 @@ function drawConceptGraph(){
   function showQuestion(){ if(!lastQ) return; qInfo={label:lastQ.label||"本題",subject:"query"};
     mode={type:"question",ids:lastQ.ids}; rebuild(); markTab(btnQ);
     const nc=curNodes.filter(k=>k!==CG_Q).length;
-    cap.textContent="本題概念圖 · "+nc+" concepts · "+((lastQ.label||"").length>40?lastQ.label.slice(0,40)+"…":(lastQ.label||"")); }
+    cap.textContent="本題概念圖 · "+qRings.length+" 層 · "+nc+" concepts · "+((lastQ.label||"").length>36?lastQ.label.slice(0,36)+"…":(lastQ.label||"")); }
   btnAll.addEventListener("click",showAll);
   btnQ.addEventListener("click",showQuestion);
   document.getElementById("cgraph-note").textContent=
