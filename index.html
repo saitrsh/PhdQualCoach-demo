@@ -59,6 +59,7 @@
   .cg-node:active{cursor:grabbing}
   .cg-label{fill:var(--ink);font-size:10px;pointer-events:none;font-family:var(--mono);
     paint-order:stroke;stroke:#0f1117;stroke-width:2.5px}
+  .cg-qlabel{fill:#e0b3ff;font-size:12px;font-weight:700}
   .cg-legend{display:flex;gap:14px;flex-wrap:wrap;margin-bottom:10px}
   .cg-legend span{font-size:12px;color:var(--dim);display:inline-flex;align-items:center;gap:6px}
   .cg-legend i{width:10px;height:10px;border-radius:3px;display:inline-block}
@@ -234,7 +235,7 @@ function render(q){
   const la=document.getElementById("llmanswer"); la.style.display="none"; la.textContent="";
   document.getElementById("genstatus").textContent="";
   // feed the concept graph this question's retrieved concepts (per-question graph)
-  if(window.__cgShowQuestion) window.__cgShowQuestion(r.cites.map(c=>c.doc_id), q);
+  if(window.__cgShowQuestion) window.__cgShowQuestion(r.cites.map(c=>({id:c.doc_id,score:c.score})), q);
 }
 
 // Server-side LLM generation (POST /api/ask). Only works when the page is served
@@ -304,68 +305,84 @@ drawCoverage();
 
 // Concept knowledge graph — nodes = CC0 notes, edges = shared-vocabulary
 // (cosine) links, laid out server-side (deterministic FR). Inline SVG, no lib.
-const CG_COL={ai:"#5b8cff",algorithms:"#37c98a",theory:"#f2b34a"};
+const CG_COL={ai:"#5b8cff",algorithms:"#37c98a",theory:"#f2b34a",query:"#e0b3ff"};
+const CG_Q="__Q__";   // sentinel id for the live "question" node
 function drawConceptGraph(){
   const g=DATA.graph; const host=document.getElementById("cgraph");
   if(!g||!g.nodes.length){ if(host)host.innerHTML='<div class="muted">no graph data</div>'; return; }
   const W=1000,H=620,N=g.nodes;
-  const IDX={}; N.forEach((n,i)=>IDX[n.id]=i);
-  // aggregated, normalized note vectors — to derive a question's sub-graph edges.
+  // per-concept metadata keyed by doc_id (the node key); + normalized note vectors.
+  const KINFO={}; N.forEach(n=>{ KINFO[n.id]={label:n.label,subject:n.subject,x:n.x,y:n.y}; });
   const NV={};
   CHUNKS.forEach(c=>{ const v=NV[c.doc_id]||(NV[c.doc_id]={}); for(const t in c.vector) v[t]=(v[t]||0)+c.vector[t]; });
   for(const d in NV){ let s=0; for(const t in NV[d]) s+=NV[d][t]*NV[d][t]; s=Math.sqrt(s)||1; for(const t in NV[d]) NV[d][t]/=s; }
   function ncos(da,db){ const x=NV[da],y=NV[db]; if(!x||!y) return 0; let s=0;
     const [sm,lg]=Object.keys(x).length<=Object.keys(y).length?[x,y]:[y,x];
     for(const t in sm) s+=sm[t]*(lg[t]||0); return s; }
-
-  // per-node state keyed by GLOBAL index, seeded from the server layout.
-  const pos={}, vel={}, orig={};
-  N.forEach((n,i)=>{ pos[i]={x:n.x,y:n.y}; vel[i]={x:0,y:0}; orig[i]={x:n.x,y:n.y}; });
   const CG_SUBS=[...new Set(N.map(n=>n.subject))];
 
-  let curNodes=[], curEdges=[], elmap={}, lineEls=[], restLen=[], adj={};
-  let svg, vp, view={k:1,tx:0,ty:0}, pinned=null, raf=null, drag=null;
+  // all node state is keyed by STRING key (doc_id, or CG_Q for the question node).
+  let pos={}, vel={}, orig={}, curNodes=[], curEdges=[], elmap={}, lineEls=[], restLen=[], adj={}, REP=0;
+  let qInfo=null, svg, vp, view={k:1,tx:0,ty:0}, pinned=null, raf=null, drag=null;
   let mode={type:"all"}, lastQ=null;
   const KS=0.09, KA=0.02, DAMP=0.80;
+  function info(k){ return k===CG_Q ? qInfo : KINFO[k]; }
 
-  // Build the node/edge lists for the current mode. "all" = the whole graph;
-  // "question" = only the notes that question retrieved, with edges = the global
-  // links among them PLUS any extra shared-vocabulary links within the subset
-  // (so a question's few concepts still show how they relate).
+  // "all" = the whole precomputed graph at its deterministic server layout.
+  // "question" = a graph BORN FROM THE STEM: a central question node with the
+  // concepts it retrieved radiating out, laid out live (fresh radial seed +
+  // repulsion + springs) so it self-organizes per question rather than reusing
+  // frozen coordinates.
   function buildLists(){
     if(mode.type==="all"){
-      curNodes=N.map((n,i)=>i); curEdges=g.edges.map(e=>[e[0],e[1],e[2]]);
+      curNodes=N.map(n=>n.id);
+      curEdges=g.edges.map(([i,j,w])=>[N[i].id,N[j].id,w]);
+      curNodes.forEach(k=>{ orig[k]={x:KINFO[k].x,y:KINFO[k].y}; });
+      REP=0;
     } else {
-      curNodes=[...new Set(mode.ids.map(d=>IDX[d]).filter(i=>i!==undefined))];
-      const set=new Set(curNodes), seen=new Set(); curEdges=[];
-      const key=(i,j)=> i<j? i+"_"+j : j+"_"+i;
-      g.edges.forEach(([i,j,w])=>{ if(set.has(i)&&set.has(j)){ curEdges.push([i,j,w]); seen.add(key(i,j)); } });
-      for(let a=0;a<curNodes.length;a++) for(let b=a+1;b<curNodes.length;b++){
-        const i=curNodes[a], j=curNodes[b]; if(seen.has(key(i,j))) continue;
-        const c=ncos(N[i].id,N[j].id); if(c>=0.03){ curEdges.push([i,j,+c.toFixed(4)]); seen.add(key(i,j)); } }
+      const items=mode.ids.map(o=>(o&&o.id)?o:{id:o,score:null}).filter(o=>KINFO[o.id]);
+      const ids=[...new Set(items.map(o=>o.id))];
+      const scoreOf={}; items.forEach(o=>{ if(o.score!=null) scoreOf[o.id]=o.score; });
+      curNodes=[CG_Q, ...ids];
+      // fresh radial seed: question in the centre, concepts on a ring.
+      const cx=W/2, cy=H/2, R=Math.min(230, 90+ids.length*18);
+      orig[CG_Q]={x:cx,y:cy};
+      ids.forEach((d,idx)=>{ const a=-Math.PI/2 + 2*Math.PI*idx/Math.max(ids.length,1);
+        orig[d]={x:cx+R*Math.cos(a), y:cy+R*Math.sin(a)}; });
+      const seen=new Set(), key=(a,b)=> a<b?a+"|"+b:b+"|"+a;
+      curEdges=[];
+      ids.forEach(d=>{ const sc=scoreOf[d]; curEdges.push([CG_Q,d, sc!=null?Math.max(0.15,Math.min(sc,1)):0.5]); seen.add(key(CG_Q,d)); });
+      for(let a=0;a<ids.length;a++) for(let b=a+1;b<ids.length;b++){ const i=ids[a],j=ids[b];
+        if(seen.has(key(i,j))) continue; const c=ncos(i,j); if(c>=0.03){ curEdges.push([i,j,+c.toFixed(4)]); seen.add(key(i,j)); } }
+      REP=2800;
     }
-    adj={}; curNodes.forEach(i=>{ adj[i]=[]; pos[i]={x:orig[i].x,y:orig[i].y}; vel[i]={x:0,y:0}; });
-    restLen=curEdges.map(([i,j])=>{ adj[i].push(j); adj[j].push(i);
-      return Math.hypot(orig[i].x-orig[j].x,orig[i].y-orig[j].y)||1; });
+    adj={}; curNodes.forEach(k=>{ adj[k]=[]; pos[k]={x:orig[k].x,y:orig[k].y}; vel[k]={x:0,y:0}; });
+    restLen=curEdges.map(([a,b,w])=>{ adj[a].push(b); adj[b].push(a);
+      if(mode.type==="all") return Math.hypot(orig[a].x-orig[b].x,orig[a].y-orig[b].y)||1;
+      if(a===CG_Q||b===CG_Q) return 160-80*Math.min(w,1);   // stronger retrieval → closer to the question
+      return 120-55*Math.min(w,1); });                       // stronger shared vocab → closer
   }
 
   function renderDOM(){
-    const edgesSvg=curEdges.map(([i,j,w],e)=>
-      `<line class="cg-edge" data-e="${e}" data-i="${i}" data-j="${j}" x1="${pos[i].x}" y1="${pos[i].y}" x2="${pos[j].x}" y2="${pos[j].y}" stroke-width="${(0.6+Math.min(w,0.5)*2).toFixed(2)}" stroke-opacity="0.5"></line>`).join("");
-    const nodesSvg=curNodes.map(i=>{ const n=N[i], deg=(adj[i]||[]).length, r=(5+Math.min(deg,6)).toFixed(1);
-      return `<g class="cg-node" data-i="${i}" transform="translate(${pos[i].x},${pos[i].y})">`+
-        `<circle r="${r}" fill="${CG_COL[n.subject]||"#9aa3b2"}" stroke="#0f1117" stroke-width="1.5"></circle>`+
-        `<text class="cg-label" x="${(+r+4).toFixed(1)}" y="3">${esc(n.label)}</text>`+
-        `<title>${esc(n.label)} · ${esc(n.subject)} · ${deg} links</title></g>`; }).join("");
+    const edgesSvg=curEdges.map(([a,b,w],e)=>
+      `<line class="cg-edge" data-e="${e}" data-a="${a}" data-b="${b}" x1="${pos[a].x}" y1="${pos[a].y}" x2="${pos[b].x}" y2="${pos[b].y}" stroke-width="${(0.6+Math.min(w,0.5)*2).toFixed(2)}" stroke-opacity="0.5"></line>`).join("");
+    const nodesSvg=curNodes.map(k=>{ const nf=info(k), isQ=(k===CG_Q), deg=(adj[k]||[]).length;
+      const r=isQ?13:(5+Math.min(deg,6)); const lab=isQ?(nf.label.length>30?nf.label.slice(0,30)+"…":nf.label):nf.label;
+      return `<g class="cg-node${isQ?" cg-q":""}" data-i="${esc(k)}" transform="translate(${pos[k].x},${pos[k].y})">`+
+        `<circle r="${r.toFixed(1)}" fill="${CG_COL[nf.subject]||"#9aa3b2"}" stroke="#0f1117" stroke-width="${isQ?2.5:1.5}"></circle>`+
+        `<text class="cg-label${isQ?" cg-qlabel":""}" x="${(r+4).toFixed(1)}" y="3">${esc(lab)}</text>`+
+        `<title>${esc(nf.label)} · ${esc(nf.subject)}${isQ?"":" · "+deg+" links"}</title></g>`; }).join("");
     host.innerHTML=`<svg id="cg-svg" viewBox="0 0 ${W} ${H}" role="img" aria-label="concept knowledge graph">`+
       `<g id="cg-vp"><g id="cg-edges">${edgesSvg}</g><g id="cg-nodes">${nodesSvg}</g></g></svg>`;
     svg=host.querySelector("#cg-svg"); vp=svg.querySelector("#cg-vp");
     lineEls=[...svg.querySelectorAll(".cg-edge")];
-    elmap={}; [...svg.querySelectorAll(".cg-node")].forEach(el=>{ elmap[+el.dataset.i]=el; });
+    elmap={}; [...svg.querySelectorAll(".cg-node")].forEach(el=>{ elmap[el.dataset.i]=el; });
     applyView(); wireEvents();
+    const nConcept=curNodes.filter(k=>k!==CG_Q).length;
     document.getElementById("cg-legend").innerHTML=CG_SUBS.map(s=>
       `<span><i style="background:${CG_COL[s]||"#9aa3b2"}"></i>${esc(s)}</span>`).join("")+
-      `<span style="margin-left:auto">${curNodes.length} notes · ${curEdges.length} links</span>`;
+      (mode.type==="question"?`<span><i style="background:${CG_COL.query}"></i>question</span>`:"")+
+      `<span style="margin-left:auto">${nConcept} notes · ${curEdges.length} links</span>`;
   }
 
   function applyView(){ if(vp) vp.setAttribute("transform",`translate(${view.tx},${view.ty}) scale(${view.k})`); }
@@ -373,26 +390,29 @@ function drawConceptGraph(){
     p.x=evt.clientX; p.y=evt.clientY; return p.matrixTransform(ctm.inverse()); }
   function toGraph(vx,vy){ return {x:(vx-view.tx)/view.k, y:(vy-view.ty)/view.k}; }
 
-  function redraw(){ curNodes.forEach(i=> elmap[i].setAttribute("transform",`translate(${pos[i].x.toFixed(1)},${pos[i].y.toFixed(1)})`));
-    curEdges.forEach(([i,j],e)=>{ const el=lineEls[e];
-      el.setAttribute("x1",pos[i].x.toFixed(1)); el.setAttribute("y1",pos[i].y.toFixed(1));
-      el.setAttribute("x2",pos[j].x.toFixed(1)); el.setAttribute("y2",pos[j].y.toFixed(1)); }); }
-  function physics(){ const F={}; curNodes.forEach(i=>F[i]={x:0,y:0});
-    curEdges.forEach(([i,j],e)=>{ const dx=pos[j].x-pos[i].x, dy=pos[j].y-pos[i].y, d=Math.hypot(dx,dy)||1,
-      f=KS*(d-restLen[e]), ux=dx/d, uy=dy/d; F[i].x+=ux*f; F[i].y+=uy*f; F[j].x-=ux*f; F[j].y-=uy*f; });
-    curNodes.forEach(i=>{ F[i].x+=KA*(orig[i].x-pos[i].x); F[i].y+=KA*(orig[i].y-pos[i].y); });
+  function redraw(){ curNodes.forEach(k=> elmap[k].setAttribute("transform",`translate(${pos[k].x.toFixed(1)},${pos[k].y.toFixed(1)})`));
+    curEdges.forEach(([a,b],e)=>{ const el=lineEls[e];
+      el.setAttribute("x1",pos[a].x.toFixed(1)); el.setAttribute("y1",pos[a].y.toFixed(1));
+      el.setAttribute("x2",pos[b].x.toFixed(1)); el.setAttribute("y2",pos[b].y.toFixed(1)); }); }
+  function physics(){ const F={}; curNodes.forEach(k=>F[k]={x:0,y:0});
+    if(REP>0){ for(let a=0;a<curNodes.length;a++) for(let b=a+1;b<curNodes.length;b++){
+      const ka=curNodes[a],kb=curNodes[b]; let dx=pos[ka].x-pos[kb].x, dy=pos[ka].y-pos[kb].y, d2=dx*dx+dy*dy||1, d=Math.sqrt(d2);
+      const f=REP/d2, ux=dx/d, uy=dy/d; F[ka].x+=ux*f; F[ka].y+=uy*f; F[kb].x-=ux*f; F[kb].y-=uy*f; } }
+    curEdges.forEach(([a,b],e)=>{ const dx=pos[b].x-pos[a].x, dy=pos[b].y-pos[a].y, d=Math.hypot(dx,dy)||1,
+      f=KS*(d-restLen[e]), ux=dx/d, uy=dy/d; F[a].x+=ux*f; F[a].y+=uy*f; F[b].x-=ux*f; F[b].y-=uy*f; });
+    curNodes.forEach(k=>{ F[k].x+=KA*(orig[k].x-pos[k].x); F[k].y+=KA*(orig[k].y-pos[k].y); });
     let energy=0;
-    curNodes.forEach(i=>{ if(i===pinned) return; vel[i].x=(vel[i].x+F[i].x)*DAMP; vel[i].y=(vel[i].y+F[i].y)*DAMP;
-      pos[i].x+=vel[i].x; pos[i].y+=vel[i].y; energy+=vel[i].x*vel[i].x+vel[i].y*vel[i].y; });
+    curNodes.forEach(k=>{ if(k===pinned) return; vel[k].x=(vel[k].x+F[k].x)*DAMP; vel[k].y=(vel[k].y+F[k].y)*DAMP;
+      pos[k].x+=vel[k].x; pos[k].y+=vel[k].y; energy+=vel[k].x*vel[k].x+vel[k].y*vel[k].y; });
     redraw();
     if(pinned!==null || energy>0.02){ raf=requestAnimationFrame(physics); } else { raf=null; } }
   function kick(){ if(raf===null) raf=requestAnimationFrame(physics); }
 
-  function focus(i){ const keep=new Set([i,...(adj[i]||[])]);
-    curNodes.forEach(k=> elmap[k].setAttribute("opacity", keep.has(k)?"1":"0.18"));
-    lineEls.forEach(el=>{ const on=(+el.dataset.i===i||+el.dataset.j===i);
-      el.setAttribute("stroke-opacity",on?"0.95":"0.06"); el.setAttribute("stroke",on?(CG_COL[N[i].subject]||"#9aa3b2"):"#39415a"); }); }
-  function reset(){ curNodes.forEach(k=> elmap[k].setAttribute("opacity","1"));
+  function focus(k){ const keep=new Set([k,...(adj[k]||[])]);
+    curNodes.forEach(x=> elmap[x].setAttribute("opacity", keep.has(x)?"1":"0.18"));
+    lineEls.forEach(el=>{ const on=(el.dataset.a===k||el.dataset.b===k);
+      el.setAttribute("stroke-opacity",on?"0.95":"0.06"); el.setAttribute("stroke",on?(CG_COL[info(k).subject]||"#9aa3b2"):"#39415a"); }); }
+  function reset(){ curNodes.forEach(x=> elmap[x].setAttribute("opacity","1"));
     lineEls.forEach(el=>{ el.setAttribute("stroke-opacity","0.5"); el.setAttribute("stroke","#39415a"); }); }
 
   function wireEvents(){
@@ -400,42 +420,43 @@ function drawConceptGraph(){
       const gx=(vb.x-view.tx)/view.k, gy=(vb.y-view.ty)/view.k, f=e.deltaY<0?1.15:1/1.15;
       view.k=Math.max(0.3,Math.min(6,view.k*f)); view.tx=vb.x-gx*view.k; view.ty=vb.y-gy*view.k; applyView(); },{passive:false});
     svg.addEventListener("pointerdown",e=>{ const ng=e.target.closest(".cg-node"), vb=toVB(e);
-      if(ng){ const i=+ng.dataset.i; drag={type:"node",i,moved:false}; pinned=i; vel[i].x=vel[i].y=0; focus(i); }
+      if(ng){ const k=ng.dataset.i; drag={type:"node",k,moved:false}; pinned=k; vel[k].x=vel[k].y=0; focus(k); }
       else { drag={type:"pan",x:vb.x,y:vb.y,tx0:view.tx,ty0:view.ty}; }
       svg.setPointerCapture(e.pointerId); e.preventDefault(); });
     svg.addEventListener("pointermove",e=>{ if(!drag) return; const vb=toVB(e);
-      if(drag.type==="node"){ drag.moved=true; const gp=toGraph(vb.x,vb.y); pos[drag.i].x=gp.x; pos[drag.i].y=gp.y; kick(); }
+      if(drag.type==="node"){ drag.moved=true; const gp=toGraph(vb.x,vb.y); pos[drag.k].x=gp.x; pos[drag.k].y=gp.y; kick(); }
       else { view.tx=drag.tx0+(vb.x-drag.x); view.ty=drag.ty0+(vb.y-drag.y); applyView(); } });
     svg.addEventListener("pointerup",e=>{ if(!drag) return;
-      if(drag.type==="node"){ if(!drag.moved){ const t=N[drag.i].subject, ts=document.getElementById("topic");
+      if(drag.type==="node"){ if(!drag.moved && drag.k!==CG_Q){ const t=info(drag.k).subject, ts=document.getElementById("topic");
           if(ts){ts.value=t; ts.dispatchEvent(new Event("change"));}
-          document.getElementById("q").value=N[drag.i].label; window.scrollTo({top:0,behavior:"smooth"}); }
+          document.getElementById("q").value=info(drag.k).label; window.scrollTo({top:0,behavior:"smooth"}); }
         pinned=null; kick(); reset(); }
       drag=null; try{svg.releasePointerCapture(e.pointerId);}catch(_){} });
     svg.addEventListener("dblclick",()=>{ view={k:1,tx:0,ty:0}; applyView();
-      curNodes.forEach(i=>{ pos[i].x=orig[i].x; pos[i].y=orig[i].y; vel[i].x=vel[i].y=0; }); redraw(); });
-    [...svg.querySelectorAll(".cg-node")].forEach(el=>{ const i=+el.dataset.i;
-      el.addEventListener("mouseenter",()=>{ if(!drag)focus(i); }); el.addEventListener("mouseleave",()=>{ if(!drag)reset(); }); });
+      curNodes.forEach(k=>{ pos[k].x=orig[k].x; pos[k].y=orig[k].y; vel[k].x=vel[k].y=0; }); kick(); });
+    [...svg.querySelectorAll(".cg-node")].forEach(el=>{ const k=el.dataset.i;
+      el.addEventListener("mouseenter",()=>{ if(!drag)focus(k); }); el.addEventListener("mouseleave",()=>{ if(!drag)reset(); }); });
   }
 
-  function rebuild(){ pinned=null; if(raf){cancelAnimationFrame(raf);raf=null;} view={k:1,tx:0,ty:0}; buildLists(); renderDOM(); }
+  function rebuild(){ pinned=null; if(raf){cancelAnimationFrame(raf);raf=null;} view={k:1,tx:0,ty:0}; buildLists(); renderDOM(); kick(); }
 
   const btnAll=document.getElementById("cg-all"), btnQ=document.getElementById("cg-q"), cap=document.getElementById("cg-caption");
   function markTab(active){ (active===btnAll?btnAll:btnQ).classList.add("cg-tab-on"); (active===btnAll?btnQ:btnAll).classList.remove("cg-tab-on"); }
   function showAll(){ mode={type:"all"}; rebuild(); markTab(btnAll); cap.textContent="總圖 · "+N.length+" concepts · "+g.edges.length+" links"; }
-  function showQuestion(){ if(!lastQ) return; mode={type:"question",ids:lastQ.ids}; rebuild(); markTab(btnQ);
-    cap.textContent="本題概念 · "+curNodes.length+" notes · "+(lastQ.label.length>44?lastQ.label.slice(0,44)+"…":lastQ.label); }
+  function showQuestion(){ if(!lastQ) return; qInfo={label:lastQ.label||"本題",subject:"query"};
+    mode={type:"question",ids:lastQ.ids}; rebuild(); markTab(btnQ);
+    const nc=curNodes.filter(k=>k!==CG_Q).length;
+    cap.textContent="本題概念圖 · "+nc+" concepts · "+((lastQ.label||"").length>40?lastQ.label.slice(0,40)+"…":(lastQ.label||"")); }
   btnAll.addEventListener("click",showAll);
   btnQ.addEventListener("click",showQuestion);
   document.getElementById("cgraph-note").textContent=
-    "拖曳概念(相連概念跟著連動) · 滾輪縮放 · 拖背景平移 · 點概念篩選 coach · 雙擊背景重置";
+    "本題模式:題幹在中心、概念即時排布 · 拖曳概念(相連跟著動) · 滾輪縮放 · 拖背景平移 · 雙擊重整版面";
 
-  // Coach hook: when a question is asked, the graph can show just that question's
-  // retrieved concepts (per-question concept graph). Enables the 本題 tab.
-  window.__cgShowQuestion=function(docIds,label){
-    const ids=[...new Set(docIds)].filter(d=>IDX[d]!==undefined);
-    if(!ids.length) return;
-    lastQ={ids,label:label||""}; btnQ.disabled=false; showQuestion();
+  // Coach hook: each asked question REGENERATES the graph live from its stem.
+  window.__cgShowQuestion=function(cites,label){
+    const items=(cites||[]).map(o=>(o&&o.id)?o:{id:o,score:null}).filter(o=>KINFO[o.id]);
+    if(!items.length) return;
+    lastQ={ids:items,label:label||""}; btnQ.disabled=false; showQuestion();
   };
 
   showAll();  // initial paint = the whole graph
