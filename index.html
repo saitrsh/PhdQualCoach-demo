@@ -133,13 +133,19 @@ function search(q,topic){
   return scored.slice(0,CFG.top_k);
 }
 function ask(q,topic){
-  const hits=search(q,topic);
+  let hits=search(q,topic);
   const top=hits.length?hits[0][0]:0;
   const warn= top < CFG.warn_threshold;
+  // A zero score means the query shared no term with that passage — it is not a
+  // real match, so never present it as a citation / grounding source.
+  hits=hits.filter(h=>h[0]>0);
   const cites=hits.map((h,i)=>({rank:i+1,...h[1],score:h[0]}));
-  const body="Q: "+q+"\n\nGrounded in the retrieved passages:\n"+
-    hits.map((h,i)=>{let s=h[1].text.replace(/\n/g," ").trim(); if(s.length>400)s=s.slice(0,400)+"…";
-      return "  ["+(i+1)+"] ("+h[1].source+") "+s;}).join("\n");
+  const body=hits.length
+    ? "Q: "+q+"\n\nGrounded in the retrieved passages:\n"+
+      hits.map((h,i)=>{let s=h[1].text.replace(/\n/g," ").trim(); if(s.length>400)s=s.slice(0,400)+"…";
+        return "  ["+(i+1)+"] ("+h[1].source+") "+s;}).join("\n")
+    : "Q: "+q+"\n\nNo passages in the corpus matched this question — it is "+
+      "likely outside the selected topic/corpus. (Try a different Topic filter, or All topics.)";
   return {body,cites,warn,top};
 }
 function esc(s){return s.replace(/[&<>]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;"}[c]));}
