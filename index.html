@@ -208,9 +208,23 @@ function searchBm25(q,topic){
 function search(q,topic){
   return CFG.retrieval_backend==="bm25" ? searchBm25(q,topic) : searchTfidf(q,topic);
 }
-function firstSentence(t){ t=t.replace(/\s+/g," ").trim();
-  const m=t.match(/^.*?[.!?。！？](\s|$)/); let s=(m?m[0]:t).trim();
-  if(s.length>240) s=s.slice(0,240)+"…"; return s; }
+// First sentence, math-aware: strips a leading markdown heading and ** bold **,
+// never ends on a "." that sits INSIDE a LaTeX span (so a formula is never cut
+// open), and treats the close of a display equation \[ … \] as a sentence end.
+function firstSentence(t){
+  t=t.replace(/^\s*#{1,6}\s.*$/gm,"").replace(/\*\*/g,"").replace(/\s+/g," ").trim();
+  let inB=false,inP=false,inD=false;
+  for(let i=0;i<t.length;i++){
+    const two=t.substr(i,2);
+    if(two==="\\["){ inB=true; i++; continue; }
+    if(two==="\\]"){ return t.slice(0,i+2).trim(); }   // display equation = natural sentence end
+    if(two==="\\("){ inP=true; i++; continue; }
+    if(two==="\\)"){ inP=false; i++; continue; }
+    if(t[i]==="$"){ inD=!inD; continue; }
+    if(!inB&&!inP&&!inD && ".!?。！？".indexOf(t[i])>=0 && (i+1>=t.length||/\s/.test(t[i+1])))
+      return t.slice(0,i+1).trim();
+  }
+  let s=t.trim(); if(s.length>260) s=s.slice(0,260)+"…"; return s; }
 function ask(q,topic){
   // Drop zero-score hits: no shared term = not a real match, so not a citation.
   const hits=search(q,topic).filter(h=>h[0]>0);
@@ -238,6 +252,12 @@ function highlightTerms(escaped,q){
     try{ html=html.replace(new RegExp("(?<![\\w&])("+p+")(?![\\w;])","gi"),'<mark>$1</mark>'); }catch(_){} });
   return html;
 }
+// Highlight only OUTSIDE math spans, so a <mark> can never land inside \[…\],
+// \(…\) or $…$ and break KaTeX (e.g. marking "mse" inside \text{MSE}).
+function highlightOutsideMath(escaped,q){
+  const parts=escaped.split(/(\\\[[\s\S]*?\\\]|\\\([\s\S]*?\\\)|\$[^$]*\$)/);
+  return parts.map((seg,i)=> (i%2===1)? seg : highlightTerms(seg,q)).join("");
+}
 
 function mathRender(el){
   if(!window.renderMathInElement) return;
@@ -254,11 +274,11 @@ function render(q){
   const kp=document.getElementById("keypoints");
   if(r.points && r.points.length){ kp.style.display="block";
     kp.innerHTML='<div class="kp-h">✦ 答案重點 · key points（擷取自接地引用）</div>'+
-      r.points.map(p=>`<div class="kp-item"><span class="kp-n">[${p.n}]</span>${highlightTerms(esc(p.text),q)}<span class="kp-src">${esc(p.doc)}</span></div>`).join("");
+      r.points.map(p=>`<div class="kp-item"><span class="kp-n">[${p.n}]</span>${highlightOutsideMath(esc(p.text),q)} <span class="kp-src">${esc(p.doc)}</span></div>`).join("");
     mathRender(kp);
   } else { kp.style.display="none"; kp.innerHTML=""; }
   const ans=document.getElementById("answer");
-  ans.innerHTML=highlightTerms(esc(r.body),q);   // mark the question's terms in the answer
+  ans.innerHTML=highlightOutsideMath(esc(r.body),q);   // mark the question's terms, never inside math
   mathRender(ans);
   const v=document.getElementById("verdict");
   v.className="verdict "+(r.warn?"v-warn":"v-good");
@@ -366,6 +386,9 @@ function drawConceptGraph(){
   // point). CC0 text already embedded in the index — safe to surface.
   const NOTE0={};
   CHUNKS.forEach(c=>{ const m=/#p(\d+)/.exec(c.chunk_id||""); const idx=m?+m[1]:0;
+    // skip a heading-only chunk (e.g. "# Mean Squared Error") so the panel shows
+    // the definition, not an empty heading.
+    if(!c.text.replace(/^\s*#{1,6}\s.*$/gm,"").trim()) return;
     if(!(c.doc_id in NOTE0) || idx<NOTE0[c.doc_id].idx) NOTE0[c.doc_id]={idx,text:c.text,source:c.source,license:c.license}; });
   function showDetail(k){ const box=document.getElementById("cg-detail"); if(!box) return; box.classList.add("on");
     if(k===CG_Q){ box.innerHTML=`<div class="cg-d-h"><span class="cg-d-badge" style="background:${CG_COL.query}">question</span>${esc(qInfo?qInfo.label:"本題")}</div>`+
