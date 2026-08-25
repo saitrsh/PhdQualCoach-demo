@@ -1,0 +1,47 @@
+<!doctype html><html lang="zh-Hant"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1"><title>Solution Card · 公開示範(CC0,非真題)</title>
+<style>
+*{box-sizing:border-box;margin:0}
+body{background:#0e0e18;font:15px/1.6 -apple-system,"Segoe UI","Noto Sans TC",sans-serif;color:#e9e9f4;padding:26px}
+.wrap{max-width:780px;margin:0 auto}
+.ph{color:#8b8ba8;font-size:.8rem;margin:0 4px 16px;text-transform:uppercase;letter-spacing:.08em}
+.card{background:#16161f;border:1px solid #2a2a3d;border-radius:18px;overflow:hidden;box-shadow:0 12px 40px rgba(0,0,0,.5);margin-bottom:26px}
+.top{background:color-mix(in srgb,var(--tc) 14%,transparent);border-bottom:1px solid #2a2a3d;padding:18px 22px;display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.sem{font-weight:800;font-size:1.05rem;color:var(--tc)}
+.tag{background:var(--tc);color:#111;font-weight:700;font-size:.72rem;padding:3px 10px;border-radius:20px}
+.diff{color:#fbbf24;letter-spacing:1px}
+.status{margin-left:auto;font-weight:800;font-size:.72rem;padding:3px 11px;border-radius:20px;background:color-mix(in srgb,var(--stcol) 15%,transparent);color:var(--stcol);border:1px solid color-mix(in srgb,var(--stcol) 40%,transparent)}
+.body{padding:20px 22px}
+.q{background:#0e0e18;border:1px solid #2a2a3d;border-radius:10px;padding:13px 15px;font-size:.92rem;color:#c9c9de;margin-bottom:16px}
+.q b{color:#e9e9f4}
+.verify{border:1px solid color-mix(in srgb,var(--vc) 55%,transparent);background:color-mix(in srgb,var(--vc) 12%,transparent);border-radius:12px;padding:13px 15px;margin-bottom:18px}
+.verify .hd{display:flex;align-items:center;gap:10px;margin-bottom:6px}
+.vbadge{background:var(--vc);color:#111;font-weight:800;font-size:.72rem;padding:3px 10px;border-radius:6px}
+.conf{color:#a2a2ba;font-size:.82rem}.caveat{font-size:.88rem;color:#e9e9f4}
+.sec{margin:15px 0}
+.sec h3{font-size:.78rem;text-transform:uppercase;letter-spacing:.06em;color:#8b8ba8;margin-bottom:7px}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:15px}
+ul{padding-left:1.1em}li{margin:.28em 0;font-size:.9rem}li.muted{color:#6b6b85;list-style:none;margin-left:-1em}
+.src{background:#0e0e18;border:1px solid #2a2a3d;border-radius:10px;padding:11px 14px;font-size:.86rem}
+.src .k{color:#8b8ba8}.src b{color:var(--tc)}
+.chip{display:inline-block;background:#22223a;color:#c9c9de;font-size:.76rem;padding:3px 9px;border-radius:6px;margin:2px 3px 2px 0}
+.foot{border-top:1px solid #2a2a3d;padding:11px 22px;font-size:.74rem;color:#6b6b85;background:#12121b}
+.foot b{color:#8b8ba8}
+</style></head><body><div class="wrap"><div class="ph">PhdQualCoach · Solution Card · 公開示範(CC0,非真題)</div><div class="card" style="--tc:#f59e0b;--vc:#f59e0b;--stcol:#34d399">
+<div class="top"><span class="sem">DEMO-SEARCH-001</span><span class="tag">Search ▸ A*</span>
+<span class="diff">★★★★☆</span><span class="status">● READY</span></div>
+<div class="body">
+  <div class="q"><b>題目</b>　Consider A* GRAPH search with an admissible heuristic h. (a) Give the form of the evaluation function f(n). (b) State the condition on h that guarantees A* returns an optimal solution under graph search. (c) Explain, with a small example, why admissibility ALONE is not sufficient once repeated states are eliminated.</div>
+  <div class="verify"><div class="hd"><span class="vbadge">Verified: PARTIAL</span>
+    <span class="conf">Confidence 0.95</span></div>
+    <div class="caveat">⚠️ A* with an admissible heuristic is optimal for TREE search. For GRAPH search (closed-set / repeated-state elimination) admissibility alone is NOT enough — you also need a CONSISTENT (monotone) heuristic, or you must allow node reopening. Assumes finite, non-negative step costs.</div><div style="margin-top:8px"><span class='chip'>Tree search or graph search?</span><span class='chip'>Heuristic admissible?</span><span class='chip'>Heuristic consistent (monotone)?</span><span class='chip'>Repeated-state checking / node reopening?</span><span class='chip'>Non-negative step costs?</span></div></div>
+  <div class="grid">
+    <div class="sec"><h3>⚠️ 常見錯誤 <span style="color:#6b6b85;font-weight:400;text-transform:none">· 🤖 LLM 每題生成</span></h3><ul><li>Writing f(n)=g(n)+h(n) but omitting that g(n) is the cost from the start node to n.</li><li>Claiming that admissibility alone guarantees optimality in graph search, forgetting the need for consistency (monotonicity).</li><li>Providing an example that does not involve repeated‑state elimination, or using a heuristic that is actually consistent, thus not illustrating the failure.</li></ul></div>
+    <div class="sec"><h3>🎯 應試策略</h3><ul><li>State the evaluation function explicitly as f(n)=g(n)+h(n) and define g(n) and h(n).</li><li>Specify the required condition: h must be consistent (for every edge (n,m), h(n) ≤ c(n,m)+h(m)), which implies admissibility and guarantees optimality with closed‑list graph search.</li><li>Present a tiny graph (e.g., S→A→G and S→B→A→G) where h is admissible but not consistent, show that A* expands A via the cheaper S→A path, closes it, then later discovers a cheaper path to A via B, but cannot reopen A, leading to a sub‑optimal solution.</li></ul></div></div>
+  <div class="sec"><h3>🔀 其他解法</h3><ul><li>Use a consistent heuristic instead of merely admissible; consistency is sufficient for optimality in graph search.</li><li>Allow node re‑expansion (i.e., do not prune repeated states) – with an admissible heuristic this also yields optimal solutions.</li></ul></div>
+  <div class="sec"><h3>🔑 相關概念</h3><span class='chip'>admissibility</span><span class='chip'>consistency (monotonicity)</span><span class='chip'>f(n)=g(n)+h(n)</span><span class='chip'>closed set / repeated states</span><span class='chip'>optimality</span></div>
+  <div class="sec"><h3>📘 來源(可追溯)</h3><div class="src">
+    <div><span class="k">Primary（L1）:</span> <b>AIMA 3rd Edition Chapter 3 (Solving Problems by Searching)</b></div>
+    <div><span class="k">Official（L0 錨點）:</span> 公開示範題 · 非真題(textbook-style, author-written)</div></div></div>
+</div>
+<div class="foot"><b>Multi-Agent:</b> Source Map → Solution → Verification (LLM-enriched KB)　·　<b>DEMO · public</b></div></div></div></body></html>
