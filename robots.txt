@@ -1,0 +1,5 @@
+# Public CC0 demo — crawling welcome.
+User-agent: *
+Allow: /
+
+Sitemap: https://saitrsh.github.io/PhdQualCoach-demo/sitemap.xml
